@@ -1,0 +1,49 @@
+name: 小智云服务保活
+
+# 三个目标都是"常驻 WebSocket 桥"：它们主动外连小智接入点，
+# 但所在平台（魔搭创空间 / WorkBuddy 发布应用）的空闲回收判定只看 HTTP 入站请求，
+# 完全不看 WebSocket 长连接。所以即使桥一直连着，只要没人访问 URL，
+# 平台照样判定空闲并回收容器 —— 容器一停，桥接进程消失，长连接随之断开。
+# 定期访问既能刷新活跃计时防止回收，也能在已被回收时触发冷启动唤醒，
+# 容器起来后应用会自动重连小智接入点。
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+    - cron: '17 3 * * *'   # 每天一次，专用于下面的心跳提交
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 唤醒三个常驻桥接服务
+        run: |
+          # 魔搭空间不带浏览器 UA 会直接 403，那样根本唤醒不了
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          for u in \
+            "https://xiaozhi-mcp.app.workbuddy.host/healthz" \
+            "https://spng709-xiaozhi-cloud-search.ms.show/" \
+            "https://spng709-xiaozhi-cloud-search-v2.ms.show/"
+          do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" --max-time 60 "$u" || echo 000)
+            echo "$(date -u '+%H:%M:%S') UTC  ->  $code  $u"
+          done
+
+      - name: 心跳提交（防 GitHub 停用定时任务）
+        # GitHub 会在仓库 60 天无任何提交时自动停用 scheduled workflow，
+        # 而停用了就没有人再唤醒那三个服务。每天提交一次时间戳让它自维持。
+        if: github.event.schedule == '17 3 * * *'
+        run: |
+          date -u '+%Y-%m-%d %H:%M UTC' > .keepalive-beat
+          git config user.name 'keepalive-bot'
+          git config user.email 'bot@users.noreply.github.com'
+          git add -A
+          git commit -m 'chore: keepalive heartbeat' || exit 0
+          git push
