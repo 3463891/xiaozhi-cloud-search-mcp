@@ -12,12 +12,21 @@ name: 小智云服务保活
 #   单个 job 上限 6 小时，留了余量。
 
 on:
+  # 每小时整点触发一次即可 —— 单个任务内部会自己跑 5 小时，
+  # 触发太勤只会让任务互相取消、白白重装依赖。
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# ⚠️ 必须加并发控制：任务一次要跑 5 小时，若不限流，cron 会不断起新任务，
+#    多个任务同时每 10 分钟点一次「重连」，桥会被强制重连得过于频繁（实测已出现过两个并发）。
+#    cancel-in-progress: true → 新任务起来时取消旧的，保证任何时刻只有一个在跑。
+concurrency:
+  group: xiaozhi-keepalive
+  cancel-in-progress: true
 
 jobs:
   keepalive:
@@ -32,6 +41,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # 缓存浏览器：否则每个任务都要重装 Chromium（约 1~2 分钟），期间无法 ping。
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-1217
 
       - name: 安装 Playwright（整轮只用装一次）
         run: |
