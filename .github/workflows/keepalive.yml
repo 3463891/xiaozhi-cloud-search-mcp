@@ -1,16 +1,23 @@
 name: 小智云服务保活
 
-# 三个目标都是"常驻 WebSocket 桥"：它们主动外连小智接入点，
-# 但所在平台（魔搭创空间 / WorkBuddy 发布应用）的空闲回收判定只看 HTTP 入站请求，
-# 完全不看 WebSocket 长连接。所以即使桥一直连着，只要没人访问 URL，
-# 平台照样判定空闲并回收容器 —— 容器一停，桥接进程消失，长连接随之断开。
-# 定期访问既能刷新活跃计时防止回收，也能在已被回收时触发冷启动唤醒，
-# 容器起来后应用会自动重连小智接入点。
+# 这三个都是常驻 WebSocket 桥（主动外连小智接入点）。所在平台在长时间没有
+# HTTP 入站请求时会回收容器，容器一停桥接进程就没了、长连接随之断开 ——
+# 而长连接本身完全不被计入活跃度。
+#
+# 两道手段叠加：
+#   1) curl 轻量唤醒：请求打到网关，触发冷启动（快、便宜）
+#   2) 真实浏览器打开：把 Gradio 跑起来，并在有登录态时点「用当前地址重连」
+#
+# 魔搭登录门：魔搭空间页（ms.show / modelscope.cn/studios/...）的 SPA 数据
+# 接口需要登录态，匿名浏览器打开会被判成「404 页面不存在」，因此：
+#   有 MS_COOKIE（魔搭会话 Cookie，存 GitHub Secrets）→ 注入后点重连
+#   没有                                             → 只打开页面保活，不算失败
+# 注意：魔搭登录带阿里滑块验证，脚本无法自动登录，Cookie 需人工登录一次导出。
 
 on:
   schedule:
     - cron: '*/10 * * * *'
-    - cron: '17 3 * * *'   # 每天一次，专用于下面的心跳提交
+    - cron: '17 3 * * *'   # 每天一次，专用于心跳提交
 
   workflow_dispatch:
 
@@ -20,25 +27,43 @@ permissions:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: 唤醒三个常驻桥接服务
+      # ---------- 1) curl 轻量唤醒 ----------
+      - name: curl 唤醒三个服务
         run: |
-          # 魔搭空间不带浏览器 UA 会直接 403，那样根本唤醒不了
+          set +e
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
           for u in \
             "https://xiaozhi-mcp.app.workbuddy.host/healthz" \
             "https://spng709-xiaozhi-cloud-search.ms.show/" \
             "https://spng709-xiaozhi-cloud-search-v2.ms.show/"
           do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" --max-time 60 "$u" || echo 000)
+            code=$(curl -sS -o /dev/null -L -A "$UA" --max-time 60 -w '%{http_code}' "$u" 2>/dev/null || echo 000)
             echo "$(date -u '+%H:%M:%S') UTC  ->  $code  $u"
           done
 
-      - name: 心跳提交（防 GitHub 停用定时任务）
+      # ---------- 2) 真实浏览器：加载页面 + 点「用当前地址重连」 ----------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 Playwright
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: 浏览器保活 + 点击重连
+        env:
+          MS_COOKIE: ${{ secrets.MS_COOKIE }}
+        run: python scripts/keepalive_browser.py
+
+      # ---------- 3) 心跳提交（防 GitHub 停用定时任务） ----------
+      - name: 心跳提交
         # GitHub 会在仓库 60 天无任何提交时自动停用 scheduled workflow，
-        # 而停用了就没有人再唤醒那三个服务。每天提交一次时间戳让它自维持。
+        # 而一停用就再没人唤醒服务。每天提交一次时间戳，让保活系统自维持。
         if: github.event.schedule == '17 3 * * *'
         run: |
           date -u '+%Y-%m-%d %H:%M UTC' > .keepalive-beat
