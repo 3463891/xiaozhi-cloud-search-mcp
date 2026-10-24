@@ -5,11 +5,12 @@
   而平台的空闲回收只认「入站请求」，所以 curl 也能唤醒网关，但看不到应用是否活着。
   用浏览器打开才能真正把 Gradio 渲染出来，并操作界面上的按钮。
 
-魔搭的登录门（关键约束）：
-  魔搭空间页面（ms.show 与 modelscope.cn/studios/...）的 SPA 数据接口需要登录态，
-  匿名浏览器打开后会被判为「404 页面不存在」。因此：
-    · 未提供 MS_COOKIE 时 → 只打开页面做保活（降级，不报错）
-    · 提供 MS_COOKIE（魔搭会话 Cookie，存 GitHub Secrets）时 → 注入后点「用当前地址重连」
+魔搭的两个关键事实（2026-10-24 实测确认）：
+  1. 两个创空间已设为**公开** → 匿名浏览器即可进入 Gradio，不再需要登录态。
+     （若将来改回私有：魔搭登录带阿里滑块，脚本无法自动登录，
+       需人工登录一次导出会话存进 MS_COOKIE，见工程记忆。）
+  2. **Gradio 被套在 iframe 里**，主页面 inner_text 是空的 ——
+     必须遍历 pg.frames 找到含按钮的那个 frame 再点，在主页面找永远找不到。
 
 安全：MS_COOKIE 只从环境变量（GitHub Secrets）读取，绝不写进日志或仓库文件。
 """
@@ -70,7 +71,7 @@ def open_page(ctx, url: str, wait_ms: int = 8000):
 def main() -> int:
     cookie_raw = os.environ.get("MS_COOKIE", "").strip()
     cookies = parse_cookie(cookie_raw)
-    log(f"魔搭登录态：{'已注入 ' + str(len(cookies)) + ' 条' if cookies else '未提供（魔搭仅做访问保活，不点按钮）'}")
+    log(f"魔搭登录态：{'已注入 ' + str(len(cookies)) + ' 条' if cookies else '未提供（空间已公开，匿名点击即可）'}")
 
     rc = 0
     launch = {"args": ["--no-sandbox"]}
@@ -108,22 +109,33 @@ def main() -> int:
             title = pg.title()
             log(f"魔搭 {url.split('/')[2]} 标题 = {title!r}")
 
-            if not cookies:
-                log("  无登录态 → 仅访问保活（按预期，不算失败）")
-                pg.close()
-                continue
+            # ⚠️ 关键：魔搭把 Gradio 套在 iframe 里，主页面 inner_text 是空的，
+            #    必须遍历所有 frame 才能找到按钮（2026-10-24 空间公开后实测确认）。
+            #    空间已公开，匿名即可点到，无需登录态。
+            target = None
+            for f in pg.frames:
+                try:
+                    if f.locator(f"button:has-text('{BTN_TEXT}')").count():
+                        target = f
+                        break
+                except Exception:
+                    continue
 
-            try:
-                btn = pg.locator(f"button:has-text('{BTN_TEXT}')").first
-                btn.wait_for(state="visible", timeout=60000)
-                btn.click(timeout=30000)
-                log(f"  已点击「{BTN_TEXT}」")
-                pg.wait_for_timeout(6000)   # 等结果/日志刷新
-                tail = (pg.inner_text("body") or "").strip().replace("\n", " | ")
-                log("  页面摘要 =", tail[:160])
-            except Exception as e:
-                log(f"  点击失败: {str(e)[:160]}")
+            if target is None:
+                log(f"  ⚠️ 未找到「{BTN_TEXT}」按钮（页面/iframe 里都没有）")
                 rc = 1
+            else:
+                try:
+                    btn = target.locator(f"button:has-text('{BTN_TEXT}')").first
+                    btn.wait_for(state="visible", timeout=60000)
+                    btn.click(timeout=30000)
+                    log(f"  已点击「{BTN_TEXT}」（位于 {target.url[:52]}）")
+                    pg.wait_for_timeout(6000)   # 等结果/日志刷新
+                    tail = (target.inner_text("body") or "").strip().replace("\n", " | ")
+                    log("  页面摘要 =", tail[:160])
+                except Exception as e:
+                    log(f"  点击失败: {str(e)[:160]}")
+                    rc = 1
             pg.close()
 
         ctx.close()
