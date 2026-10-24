@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350        # 略小于 6 小时上限
     env:
-      ROUNDS: 1                 # 临时改成 1 轮，用于验证云端点击是否生效（验证完改回 30）
+      ROUNDS: 30                # 30 轮 × 10 分钟 ≈ 5 小时
       GAP: 600                  # 每轮间隔（秒）
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +62,13 @@ jobs:
             python scripts/keepalive_browser.py || echo "  (浏览器步骤异常，下一轮继续)"
 
             i=$((i + 1))
-            [ "$i" -le "$ROUNDS" ] && sleep "$GAP"
+            # ⚠️ 不能写成 `[ "$i" -le "$ROUNDS" ] && sleep "$GAP"`：
+            #   Actions 的 shell 是 `-e` 模式，轮数跑完后这个测试恒为假并返回 1，
+            #   会让整个 job 以 exit 1 判成"失败"（2026-10-24 实测踩过）。
+            #   改用 if，条件不成立时 if 语句整体返回 0。
+            if [ "$i" -le "$ROUNDS" ]; then
+              sleep "$GAP"
+            fi
           done
 
       - name: 心跳提交（防 GitHub 停用定时任务）
