@@ -33,8 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350        # 略小于 6 小时上限
     env:
-      ROUNDS: 30                # 30 轮 × 10 分钟 ≈ 5 小时
-      GAP: 600                  # 每轮间隔（秒）
+      ROUNDS: 60                # 60 轮 × 5 分钟 ≈ 5 小时
+      GAP: 300                  # 每轮间隔（秒）—— 5 分钟访问一次
     steps:
       - uses: actions/checkout@v4
 
